@@ -57,14 +57,23 @@ def tool_fetch_url(url: str) -> str:
 
 
 def tool_web_search(query: str) -> str:
-    """Search the web via DuckDuckGo's HTML endpoint and return titles + URLs."""
+    """Search the web. Tries DuckDuckGo HTML first, falls back to Wikipedia's search API
+    if DuckDuckGo is unreachable (common on cloud/datacenter IPs)."""
+    from bs4 import BeautifulSoup
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    # Attempt 1: DuckDuckGo HTML
     try:
-        from bs4 import BeautifulSoup
         resp = requests.get(
             "https://html.duckduckgo.com/html/",
             params={"q": query},
-            timeout=20,
-            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+            headers=headers,
         )
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -73,11 +82,31 @@ def tool_web_search(query: str) -> str:
             title = a.get_text(strip=True)
             href = a.get("href", "")
             results.append(f"{title} -- {href}")
-        if not results:
-            return "No results found."
-        return "\n".join(results)
-    except Exception as e:
-        return f"ERROR searching '{query}': {e}"
+        if results:
+            return "\n".join(results)
+    except Exception:
+        pass  # fall through to next attempt
+
+    # Attempt 2: Wikipedia opensearch API (reliable from cloud IPs, useful for topic/entity lookups)
+    try:
+        resp = requests.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={"action": "opensearch", "search": query, "limit": 5, "format": "json"},
+            timeout=10,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        titles, _, urls = resp.json()[0], resp.json()[1], resp.json()[3]
+        if titles:
+            return "\n".join(f"{t} -- {u}" for t, u in zip(titles, urls))
+    except Exception:
+        pass
+
+    return (
+        "ERROR: web search is currently unreachable from this server. "
+        "Try fetch_url directly on a specific URL you can reason about instead "
+        "(e.g. a known government press-release domain like pib.gov.in)."
+    )
 
 
 def tool_run_python(code: str) -> str:
@@ -207,13 +236,31 @@ def run_agent(chat_id: int, user_text: str) -> str:
     log_event({"chat_id": chat_id, "type": "incoming_message", "text": user_text})
 
     for step in range(8):  # cap tool-call loop
-        resp = client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0,
-        )
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0,
+            )
+        except Exception as e:
+            # Groq/Llama sometimes emits a malformed raw tool-call string that fails
+            # server-side validation (e.g. "tool call validation failed ... not in
+            # request.tools"). Recover by telling the model to retry properly instead
+            # of crashing the whole turn.
+            err_text = str(e)
+            log_event({"chat_id": chat_id, "type": "tool_call_error", "error": err_text})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Your previous response was not a valid tool call (it was malformed). "
+                    "Call exactly one tool at a time using the proper tool-calling mechanism "
+                    "with correctly formatted JSON arguments, or reply with your final JSON "
+                    "answer if you already have a verified result."
+                ),
+            })
+            continue
         msg = resp.choices[0].message
 
         if msg.tool_calls:
