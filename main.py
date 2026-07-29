@@ -62,7 +62,20 @@ def tool_run_python(code: str) -> str:
     The code should print() whatever result it wants returned.
     """
     stdout = io.StringIO()
-    local_ns: dict[str, Any] = {"pd": pd, "requests": requests, "json": json}
+
+    class _SafeRequests:
+        """Wraps requests.get/post to force a default timeout if the agent forgets one."""
+        @staticmethod
+        def get(*args, **kwargs):
+            kwargs.setdefault("timeout", 20)
+            return requests.get(*args, **kwargs)
+
+        @staticmethod
+        def post(*args, **kwargs):
+            kwargs.setdefault("timeout", 20)
+            return requests.post(*args, **kwargs)
+
+    local_ns: dict[str, Any] = {"pd": pd, "requests": _SafeRequests, "json": json}
     try:
         with contextlib.redirect_stdout(stdout):
             exec(code, {"__builtins__": __builtins__}, local_ns)
@@ -105,14 +118,26 @@ SYSTEM_PROMPT = """You are a careful data analyst agent. You will be given a dat
 question via a Telegram message. The message will tell you EXACTLY what JSON shape to reply \
 with for the "answer" field.
 
-Rules:
-1. Use the fetch_url and run_python tools as needed to actually retrieve and compute the answer. \
-Do not guess or fabricate numbers you could compute or look up.
-2. Once you have the final answer, respond with ONLY a single JSON object and nothing else \
-(no markdown fences, no explanation), with exactly two top-level keys:
+CRITICAL RULES:
+1. NEVER fabricate, guess, hardcode, or assume a numeric/factual answer. If you have not \
+actually retrieved and verified a value via fetch_url/run_python, you must keep investigating \
+(try a different URL, search for the actual dataset file, inspect the fetched content more \
+carefully) rather than inventing a placeholder like 0 or "unknown".
+2. When writing code for run_python, ALWAYS use real newlines between statements (write \
+multi-line code, not everything crammed onto one line with semicolons). Never place a '#' \
+comment on the same line before other code you intend to execute -- anything after '#' is \
+ignored until the next newline, which will silently delete your remaining code.
+3. After every run_python call, check the returned output carefully. If it says \
+"(no output; use print() to return results)" or shows an error, your code did NOT produce a \
+usable result -- fix the code and retry rather than proceeding as if it worked.
+4. If fetch_url returns a webpage (HTML) rather than raw data, look for links to actual data \
+files (CSV/XLSX/JSON/API endpoints) within it and fetch those instead of trying to parse \
+navigation HTML as if it were a data table.
+5. Once you have a real, verified answer, respond with ONLY a single JSON object and nothing \
+else (no markdown fences, no explanation), with exactly two top-level keys:
    - "answer": shaped exactly as the incoming question asked for.
    - "log_url": the literal string PLACEHOLDER_LOG_URL (it will be substituted automatically).
-3. Never include any text outside that single JSON object in your final reply.
+6. Never include any text outside that single JSON object in your final reply.
 """
 
 
