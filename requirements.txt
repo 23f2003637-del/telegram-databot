@@ -4,3 +4,6 @@ requests
 pandas
 groq
 python-multipart
+lxml
+beautifulsoup4
+openpyxl

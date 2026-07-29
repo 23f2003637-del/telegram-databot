@@ -119,25 +119,32 @@ question via a Telegram message. The message will tell you EXACTLY what JSON sha
 with for the "answer" field.
 
 CRITICAL RULES:
-1. NEVER fabricate, guess, hardcode, or assume a numeric/factual answer. If you have not \
-actually retrieved and verified a value via fetch_url/run_python, you must keep investigating \
-(try a different URL, search for the actual dataset file, inspect the fetched content more \
-carefully) rather than inventing a placeholder like 0 or "unknown".
+1. NEVER fabricate, guess, hardcode, or assume a numeric/factual answer -- not even as a \
+last resort after tool errors. If fetch_url or run_python fail, that is a signal to try a \
+DIFFERENT approach (a different URL, a different parsing library, searching the fetched HTML \
+for a direct link to a CSV/XLSX/JSON data file rather than parsing the page itself), never a \
+signal to fall back on what you already "know". Answering from memory instead of verified tool \
+output is a failure condition, even if the number happens to be correct.
 2. When writing code for run_python, ALWAYS use real newlines between statements (write \
 multi-line code, not everything crammed onto one line with semicolons). Never place a '#' \
 comment on the same line before other code you intend to execute -- anything after '#' is \
 ignored until the next newline, which will silently delete your remaining code.
 3. After every run_python call, check the returned output carefully. If it says \
 "(no output; use print() to return results)" or shows an error, your code did NOT produce a \
-usable result -- fix the code and retry rather than proceeding as if it worked.
-4. If fetch_url returns a webpage (HTML) rather than raw data, look for links to actual data \
-files (CSV/XLSX/JSON/API endpoints) within it and fetch those instead of trying to parse \
-navigation HTML as if it were a data table.
-5. Once you have a real, verified answer, respond with ONLY a single JSON object and nothing \
+usable result -- fix the code and retry with a different strategy rather than proceeding as if \
+it worked.
+4. If fetch_url returns a webpage (HTML) rather than raw data, parse it (e.g. via \
+BeautifulSoup or pandas.read_html, both available) to find links to actual data files \
+(CSV/XLSX/JSON/API endpoints) and fetch those instead of trying to parse navigation HTML as if \
+it were a data table.
+5. If, after several genuine attempts with different strategies, you truly cannot retrieve \
+verifiable data, say so plainly in the answer field (e.g. null or a short explanatory string) \
+rather than inventing a plausible-looking number.
+6. Once you have a real, verified answer, respond with ONLY a single JSON object and nothing \
 else (no markdown fences, no explanation), with exactly two top-level keys:
    - "answer": shaped exactly as the incoming question asked for.
    - "log_url": the literal string PLACEHOLDER_LOG_URL (it will be substituted automatically).
-6. Never include any text outside that single JSON object in your final reply.
+7. Never include any text outside that single JSON object in your final reply.
 """
 
 
