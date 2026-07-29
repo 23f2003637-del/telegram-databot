@@ -56,6 +56,30 @@ def tool_fetch_url(url: str) -> str:
         return f"ERROR fetching {url}: {e}"
 
 
+def tool_web_search(query: str) -> str:
+    """Search the web via DuckDuckGo's HTML endpoint and return titles + URLs."""
+    try:
+        from bs4 import BeautifulSoup
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for a in soup.select("a.result__a")[:8]:
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            results.append(f"{title} -- {href}")
+        if not results:
+            return "No results found."
+        return "\n".join(results)
+    except Exception as e:
+        return f"ERROR searching '{query}': {e}"
+
+
 def tool_run_python(code: str) -> str:
     """
     Execute Python code in a sandboxed namespace with pandas/requests available.
@@ -89,6 +113,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": "Search the web for a query and get back a list of page titles and URLs. Use this FIRST when you don't already know the exact URL for a dataset -- never guess a domain name.",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Search query"}},
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "fetch_url",
             "description": "Fetch the raw text/HTML/CSV/JSON content of a public URL (e.g. a MOSPI dataset page or a direct file link).",
             "parameters": {
@@ -112,7 +148,7 @@ TOOLS = [
     },
 ]
 
-TOOL_IMPL = {"fetch_url": tool_fetch_url, "run_python": tool_run_python}
+TOOL_IMPL = {"web_search": tool_web_search, "fetch_url": tool_fetch_url, "run_python": tool_run_python}
 
 SYSTEM_PROMPT = """You are a careful data analyst agent. You will be given a data-analysis \
 question via a Telegram message. The message will tell you EXACTLY what JSON shape to reply \
@@ -121,10 +157,12 @@ with for the "answer" field.
 CRITICAL RULES:
 1. NEVER fabricate, guess, hardcode, or assume a numeric/factual answer -- not even as a \
 last resort after tool errors. If fetch_url or run_python fail, that is a signal to try a \
-DIFFERENT approach (a different URL, a different parsing library, searching the fetched HTML \
-for a direct link to a CSV/XLSX/JSON data file rather than parsing the page itself), never a \
-signal to fall back on what you already "know". Answering from memory instead of verified tool \
-output is a failure condition, even if the number happens to be correct.
+DIFFERENT approach, never a signal to fall back on what you already "know". Answering from \
+memory instead of verified tool output is a failure condition, even if the number happens to \
+be correct.
+2. NEVER guess a URL or domain name from memory (e.g. assuming a government site is on \
+.nic.in vs .gov.in). Use web_search first to find the correct, real URL before calling \
+fetch_url. Guessed domains frequently fail to resolve and waste attempts.
 2. When writing code for run_python, ALWAYS use real newlines between statements (write \
 multi-line code, not everything crammed onto one line with semicolons). Never place a '#' \
 comment on the same line before other code you intend to execute -- anything after '#' is \
@@ -137,14 +175,21 @@ it worked.
 BeautifulSoup or pandas.read_html, both available) to find links to actual data files \
 (CSV/XLSX/JSON/API endpoints) and fetch those instead of trying to parse navigation HTML as if \
 it were a data table.
-5. If, after several genuine attempts with different strategies, you truly cannot retrieve \
+5. IMPORTANT: mospi.gov.in is a JavaScript-rendered single-page app -- fetching it with \
+fetch_url only returns an empty HTML shell with no real data, no matter how you parse it. For \
+MOSPI-sourced statistics (health, economic, social indicators), prefer searching for the same \
+data published as a plain-HTML Press Information Bureau release at pib.gov.in (search-engine-\
+indexable, e.g. via a Google-style query embedded in a fetch_url to a search results page, or \
+by trying likely pib.gov.in URLs), or other plain-HTML government/news sources that actually \
+contain the figures in the page text, rather than repeatedly retrying mospi.gov.in itself.
+6. If, after several genuine attempts with different strategies, you truly cannot retrieve \
 verifiable data, say so plainly in the answer field (e.g. null or a short explanatory string) \
 rather than inventing a plausible-looking number.
-6. Once you have a real, verified answer, respond with ONLY a single JSON object and nothing \
+7. Once you have a real, verified answer, respond with ONLY a single JSON object and nothing \
 else (no markdown fences, no explanation), with exactly two top-level keys:
    - "answer": shaped exactly as the incoming question asked for.
    - "log_url": the literal string PLACEHOLDER_LOG_URL (it will be substituted automatically).
-7. Never include any text outside that single JSON object in your final reply.
+8. Never include any text outside that single JSON object in your final reply.
 """
 
 
@@ -203,6 +248,17 @@ def run_agent(chat_id: int, user_text: str) -> str:
     return json.dumps({"answer": None, "log_url": "PLACEHOLDER_LOG_URL"})
 
 
+def _coerce_nulls(obj):
+    """Recursively convert string 'null'/'none' (any case) into real JSON null."""
+    if isinstance(obj, dict):
+        return {k: _coerce_nulls(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_nulls(v) for v in obj]
+    if isinstance(obj, str) and obj.strip().lower() in ("null", "none"):
+        return None
+    return obj
+
+
 def finalize_reply(raw_text: str) -> str:
     """Ensure the reply is valid JSON with a real log_url substituted in."""
     log_url = f"{PUBLIC_BASE_URL}/run.jsonl"
@@ -214,6 +270,7 @@ def finalize_reply(raw_text: str) -> str:
             if cleaned.lower().startswith("json"):
                 cleaned = cleaned[4:]
         obj = json.loads(cleaned)
+        obj = _coerce_nulls(obj)
         obj["log_url"] = log_url
         return json.dumps(obj)
     except Exception:
